@@ -11,7 +11,7 @@ except ImportError:
     st.stop()
 
 # --- 1. 核心視覺 (延用您的白底黑字規範) ---
-st.set_page_config(page_title="臻·極速自然能量域", layout="wide")
+st.set_page_config(page_title="測試", layout="wide")
 st.markdown("<style>.stApp {background-color: #ffffff;}</style>", unsafe_allow_html=True)
 
 # --- 2. 曉臻 2.0 專屬組件：防亂碼打字機 ---
