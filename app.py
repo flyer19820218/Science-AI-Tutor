@@ -1,7 +1,9 @@
+import time
 import streamlit as st
 import google.generativeai as genai
 import os, re, base64, io, asyncio
 from PIL import Image
+
 
 import fitz  # pymupdf
 import edge_tts
@@ -148,7 +150,7 @@ def gemini_generate_page(api_key: str, page_num: int, page_img: Image.Image):
 # 7) 準備單頁上課包：PDF + Gemini + TTS
 # =========================
 def prepare_page_packet(api_key: str, pdf_path: str, page_num: int):
-    png = render_pdf_page_image(pdf_path, page_num, zoom=2.0)
+    png = render_pdf_page_image(pdf_path, page_num, zoom=1.0)
     if not png:
         return None
     img = png_bytes_to_pil(png)
