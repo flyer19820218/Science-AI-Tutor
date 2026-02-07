@@ -267,7 +267,7 @@ if not st.session_state.class_started:
 
 else:
     # 狀態 B: 上課中顯示
-    st.success("🔔 XX老師正在上課中！")
+    st.success("🔔 曉臻老師正在上課中！")
     if "audio_html" in st.session_state: 
         st.markdown(st.session_state.audio_html, unsafe_allow_html=True)
     st.divider()
