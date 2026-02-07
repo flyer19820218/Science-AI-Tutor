@@ -136,8 +136,17 @@ def gemini_generate_page(api_key: str, page_num: int, page_img: Image.Image):
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("models/gemini-2.5-flash")
 
-    res = model.generate_content([f"{SYSTEM_PROMPT}\n導讀P.{page_num}內容。", page_img])
-    raw = (res.text or "").replace("\u00a0", " ").strip()
+    t0 = time.time()
+try:
+    res = model.generate_content(
+        [f"{SYSTEM_PROMPT}\n導讀P.{page_num}內容。", page_img],
+        request_options={"timeout": 60}  # 超過 60 秒直接中止，避免轉到死
+    )
+except Exception as e:
+    raise RuntimeError(f"Gemini 生成超時或失敗：{e}")
+
+raw = (res.text or "").replace("\u00a0", " ").strip()
+st.info(f"✅ Gemini 完成（{time.time()-t0:.1f}s）")
 
     voice_matches = re.findall(r"\[\[VOICE_START\]\](.*?)\[\[VOICE_END\]\]", raw, re.DOTALL)
     voice_text = " ".join(m.strip() for m in voice_matches).strip() if voice_matches else raw
