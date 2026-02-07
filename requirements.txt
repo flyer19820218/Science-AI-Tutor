@@ -1,5 +1,7 @@
 streamlit
 google-generativeai
-Pillow
 pymupdf
+pillow
 edge-tts
+streamlit-autorefresh
+mutagen
