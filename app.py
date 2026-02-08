@@ -52,8 +52,11 @@ st.markdown("""
     .guide-box { border: 2px dashed #01579b; padding: 1rem; border-radius: 12px; background-color: #f0f8ff; color: #000; }
     .info-box { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; background-color: #f9f9f9; font-size: 0.9rem; }
     
-    /* 逐字稿備用區塊 */
-    .transcript-box { background-color: #f8f9fa; border-left: 6px solid #2b2b2b; padding: 15px; margin-top: 10px; margin-bottom: 30px; border-radius: 4px; }
+    /* 隱藏逐字稿大區塊 (只留播放器) */
+    .transcript-box { display: none; }
+    
+    /* 播放器優化 */
+    audio { width: 100%; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border-radius: 8px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -61,7 +64,7 @@ st.title("🏃‍♀️ 臻 · 極速自然能量域")
 st.markdown("### 🔬 資深理化老師 AI 助教：曉臻老師陪你衝刺科學馬拉松")
 st.divider()
 
-# --- 2. 曉臻語音引擎 (強制 VTT 版) ---
+# --- 2. 曉臻語音引擎 (VTT 格式修正版) ---
 async def generate_audio_and_vtt(text):
     # 1. 文本清洗
     voice_text = text.replace("---PAGE_SEP---", " ")
@@ -76,11 +79,12 @@ async def generate_audio_and_vtt(text):
     communicate = edge_tts.Communicate(clean_text, "zh-TW-HsiaoChenNeural", rate="-2%")
     
     audio_data = b""
-    vtt_lines = ["WEBVTT\n"]
+    # ⚠️ 關鍵修正：VTT 檔頭後方必須要有空行，瀏覽器才讀得到！
+    vtt_lines = ["WEBVTT\n\n"] 
     
     current_sentence = ""
     start_time = 0
-    has_word_boundary = False # 檢查是否有抓到時間軸
+    has_word_boundary = False
     
     def format_time(offset_ticks):
         total_seconds = offset_ticks / 10_000_000
@@ -104,27 +108,26 @@ async def generate_audio_and_vtt(text):
                 
                 current_sentence += word
                 
-                if word in ["，", "。", "！", "？", "、", "!", "?", ",", "."] or len(current_sentence) > 20:
+                # 斷句邏輯
+                if word in ["，", "。", "！", "？", "、", "!", "?", ",", "."] or len(current_sentence) > 25:
                     end_time = offset + duration
                     vtt_lines.append(f"{format_time(start_time)} --> {format_time(end_time)}")
-                    vtt_lines.append(f"{current_sentence}\n")
+                    vtt_lines.append(f"{current_sentence}\n") # 加上換行
+                    vtt_lines.append("\n") # 區塊間空行
                     current_sentence = ""
                     start_time = 0 
 
-        # 補上最後一句
         if current_sentence:
              vtt_lines.append(f"{format_time(start_time)} --> {format_time(start_time + 10_000_000)}")
              vtt_lines.append(f"{current_sentence}\n")
-             
-        # 🔴 強制保險：如果完全沒抓到時間軸 (has_word_boundary = False)，手動補一條全時段字幕
+
+        # 保險：若無時間軸，生成一條假字幕
         if not has_word_boundary:
              vtt_lines.append("00:00:00.000 --> 00:20:00.000")
-             vtt_lines.append("（正在播放音訊...請參考下方逐字稿）\n")
+             vtt_lines.append("（正在播放音訊...請開啟 CC 字幕）\n")
 
         audio_b64 = base64.b64encode(audio_data).decode()
-        
-        # 只要有跑完流程，VTT 一定有東西 (最差就是那條強制保險)
-        vtt_content = "\n".join(vtt_lines)
+        vtt_content = "".join(vtt_lines) # 已經有 \n 了
         vtt_b64 = base64.b64encode(vtt_content.encode()).decode()
         
         return audio_b64, vtt_b64
@@ -144,10 +147,10 @@ st.sidebar.title("🚪 打開實驗室大門-金鑰")
 st.sidebar.markdown("""
 <div class="info-box">
     <b>📢 曉臻老師的叮嚀：</b><br>
-    現在有<b>「動態字幕」</b>囉！<br>
-    請留意畫面上的播放器。<br>
-    有發現什麼 Bug，請來信：<br>
-    <a href="mailto:flyer19820218@gmail.com" style="color: #01579b; text-decoration: none; font-weight: bold;">flyer19820218@gmail.com</a>
+    現在是 <b>Podcast 模式</b>！<br>
+    照片已經收起來囉，請專心看講義。<br>
+    如果沒看到字幕，請檢查播放器的設定。<br>
+    <a href="mailto:flyer19820218@gmail.com" style="color: #01579b;">flyer19820218@gmail.com</a>
 </div>
 <br>
 """, unsafe_allow_html=True)
@@ -155,8 +158,7 @@ st.sidebar.markdown("""
 <div class="guide-box">
     <b>📖 值日生啟動指南：</b><br>
     1. 前往 <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#01579b; font-weight:bold;">Google AI Studio</a>。<br>
-    2. 點擊 <b>Create API key</b> 並勾選同意。<br>
-    3. 貼回下方金鑰區開啟能量域！
+    2. 貼回下方金鑰區開啟能量域！
 </div>
 """, unsafe_allow_html=True)
 user_key = st.sidebar.text_input("🔑 實驗室啟動金鑰", type="password", key="tower_key")
@@ -168,7 +170,6 @@ uploaded_file = st.sidebar.file_uploader("📸 照片區：", type=["jpg", "png"
 # --- 初始化 State ---
 if "class_started" not in st.session_state: st.session_state.class_started = False
 if "display_images" not in st.session_state: st.session_state.display_images = []
-if "raw_parts" not in st.session_state: st.session_state.raw_parts = [] 
 if "audio_b64" not in st.session_state: st.session_state.audio_b64 = None
 if "vtt_b64" not in st.session_state: st.session_state.vtt_b64 = None
 if "error_msg" not in st.session_state: st.session_state.error_msg = None
@@ -204,46 +205,33 @@ pdf_path = os.path.join("data", filename)
 # --- 主畫面邏輯 ---
 if not st.session_state.class_started:
     
-    # 1. 曉臻封面圖
+    # --- 備課模式：顯示大圖 ---
     cover_image_path = None
     for ext in [".jpg", ".png", ".jpeg", ".JPG", ".PNG"]:
         temp_path = os.path.join("data", f"cover{ext}")
         if os.path.exists(temp_path):
             cover_image_path = temp_path
             break
-            
     if cover_image_path:
-        try:
-            st.image(Image.open(cover_image_path), use_container_width=True)
-        except Exception:
-            st.info("🏃‍♀️ 曉臻老師正在操場跑步熱身中...")
+        st.image(Image.open(cover_image_path), use_container_width=True)
     else:
         st.info("🏃‍♀️ 曉臻老師正在起跑線上準備中...")
 
     st.divider()
 
-    # 2. 隱藏式預覽
     show_preview = st.checkbox("👀 我想先偷看一下講義內容 (預覽模式)", value=False)
-    
-    if show_preview:
-        if os.path.exists(pdf_path):
-            try:
-                doc = fitz.open(pdf_path)
-                total_pages = len(doc)
-                if start_page > total_pages:
-                    st.warning(f"⚠️ 跑過頭囉！這本只有 {total_pages} 頁。")
-                else:
-                    page = doc.load_page(start_page - 1) 
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                    img = Image.open(io.BytesIO(pix.tobytes()))
-                    st.image(img, caption=f"📍 預覽：第 {start_page} 頁 (全書共 {total_pages} 頁)", use_container_width=True)
-            except Exception as e:
-                st.error(f"❌ 讀取失敗：{e}")
-        else:
-            st.warning(f"📂 找不到講義：{filename}")
+    if show_preview and os.path.exists(pdf_path):
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            page = doc.load_page(start_page - 1) 
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img = Image.open(io.BytesIO(pix.tobytes()))
+            st.image(img, caption=f"📍 預覽：第 {start_page} 頁 (全書共 {total_pages} 頁)", use_container_width=True)
+        except: pass
 
-    # 3. 開始按鈕
     st.divider()
+    # 按鈕區 (縮排修復重點區)
     if st.button(f"🏃‍♀️ 確認無誤 - 開始今天的 AI 自然課程 (P.{start_page}~P.{start_page+4})", type="primary", use_container_width=True):
         if user_key and os.path.exists(pdf_path):
             with st.status("🏃‍♀️ 曉臻老師正在暖身中...", expanded=True) as status:
@@ -270,31 +258,17 @@ if not st.session_state.class_started:
                     res = MODEL.generate_content([f"{SYSTEM_PROMPT}\n導讀P.{start_page}起內容。"] + images_to_process)
                     raw_res = res.text.replace('\u00a0', ' ')
                     
-                    if "---PAGE_SEP---" in raw_res:
-                        raw_parts_split = [p for p in raw_res.split("---PAGE_SEP---") if p.strip()]
-                    else:
-                        raw_parts_split = [raw_res]
-                    st.session_state.raw_parts = raw_parts_split
-                    
                     st.write("🎙️ 正在錄製語音與生成字幕 (這一步最久，請稍候)...")
                     voice_matches = re.findall(r'\[\[VOICE_START\]\](.*?)\[\[VOICE_END\]\]', raw_res, re.DOTALL)
-                    if voice_matches:
-                        voice_full_text = " ".join(voice_matches)
-                    else:
-                        voice_full_text = clean_for_eye(raw_res)
+                    voice_full_text = " ".join(voice_matches) if voice_matches else clean_for_eye(raw_res)
                     
                     result_audio, result_vtt = asyncio.run(generate_audio_and_vtt(voice_full_text))
                     
-                    if result_audio:
-                        st.session_state.audio_b64 = result_audio
-                        st.session_state.vtt_b64 = result_vtt
-                        st.session_state.error_msg = None
-                    else:
-                        st.session_state.audio_b64 = None
-                        st.session_state.error_msg = result_vtt 
+                    st.session_state.audio_b64 = result_audio if result_audio else None
+                    st.session_state.vtt_b64 = result_vtt if result_audio else None
+                    st.session_state.error_msg = result_vtt if not result_audio else None
                         
                     st.session_state.display_images = display_images_list
-                    
                     status.update(label="✅ 備課完成！曉臻老師準備好了！", state="complete", expanded=False)
                     st.session_state.class_started = True
                     st.rerun() 
@@ -307,14 +281,15 @@ if not st.session_state.class_started:
             st.error(f"📂 找不到講義文件：{filename}")
 
 else:
-    # 狀態 B: 上課中顯示
-    st.success("🔔 曉臻老師正在上課中！")
+    # --- 上課模式：無封面圖，只有播放器+講義 ---
+    st.success("🔔 曉臻老師 Podcast 上線中！")
     
     if st.session_state.error_msg:
         st.error(f"⚠️ 語音生成失敗：{st.session_state.error_msg}")
     
-    # 🌟 強制顯示 HTML5 播放器 (因為現在保證有 VTT，所以不需 fallback)
-    if st.session_state.audio_b64 and st.session_state.vtt_b64:
+    # 播放器與字幕 (CC)
+    if st.session_state.audio_b64:
+        st.markdown("**👇 請點擊播放器右下角的「三點」或「CC」圖示開啟字幕！**")
         audio_player_html = f"""
         <style>
          video::cue, audio::cue {{
@@ -335,19 +310,9 @@ else:
 
     st.divider()
 
-    raw_parts = st.session_state.get("raw_parts", [])
-
+    # 顯示講義 (無文字稿，只有圖片)
     for i, (p_num, img) in enumerate(st.session_state.display_images):
         st.image(img, caption=f"🏁 第 {p_num} 頁講義", use_container_width=True)
-        
-        # 逐字稿顯示 (作為備案，預設顯示)
-        txt_idx = i 
-        if txt_idx < len(raw_parts):
-            page_text_clean = clean_for_eye(raw_parts[txt_idx])
-            if page_text_clean:
-                with st.container():
-                    st.markdown(f'<div class="transcript-box"><b>📜 曉臻老師的逐字稿 (P.{p_num})：</b></div>', unsafe_allow_html=True)
-                    st.markdown(page_text_clean)
         st.divider()
 
     if st.button("🏁 下課休息 (回到首頁)"):
