@@ -62,7 +62,6 @@ st.markdown("### 🔬 資深理化老師 AI 助教：曉臻老師陪你衝刺科
 st.divider()
 
 # --- 2. 曉臻語音引擎 (含 VTT 字幕生成) ---
-# 這是這次的大升級：同時產出聲音(mp3)與時間軸(vtt)
 async def generate_audio_and_vtt(text):
     # 1. 文本清洗
     voice_text = text.replace("---PAGE_SEP---", " ")
@@ -72,19 +71,16 @@ async def generate_audio_and_vtt(text):
     
     clean_text = voice_text.replace("[[VOICE_START]]", "").replace("[[VOICE_END]]", "")
     clean_text = re.sub(r'[<>#@*_=]', '', clean_text)
-    # 移除 LaTeX $ 符號，避免影響語音，但保留內容讀出來
-    clean_text = clean_text.replace("$", "")
+    clean_text = clean_text.replace("$", "") # 移除 LaTeX $ 符號
 
     communicate = edge_tts.Communicate(clean_text, "zh-TW-HsiaoChenNeural", rate="-2%")
     
     audio_data = b""
-    vtt_lines = ["WEBVTT\n"] # VTT 檔案檔頭
+    vtt_lines = ["WEBVTT\n"]
     
-    # 變數用來計算時間與拼接句子
     current_sentence = ""
     start_time = 0
     
-    # 輔助函式：將 edge_tts 的時間單位 (100ns) 轉為 VTT 格式 (HH:MM:SS.mmm)
     def format_time(offset_ticks):
         total_seconds = offset_ticks / 10_000_000
         hours = int(total_seconds // 3600)
@@ -97,7 +93,6 @@ async def generate_audio_and_vtt(text):
             if chunk["type"] == "audio":
                 audio_data += chunk["data"]
             elif chunk["type"] == "WordBoundary":
-                # 這是生成字幕的關鍵！抓取每一個字的邊界
                 word = chunk["text"]
                 offset = chunk["offset"]
                 duration = chunk["duration"]
@@ -107,28 +102,20 @@ async def generate_audio_and_vtt(text):
                 
                 current_sentence += word
                 
-                # 判斷斷句：遇到標點符號就切一行字幕
                 if word in ["，", "。", "！", "？", "、", "!", "?", ",", "."] or len(current_sentence) > 20:
                     end_time = offset + duration
-                    # 寫入 VTT 格式
                     vtt_lines.append(f"{format_time(start_time)} --> {format_time(end_time)}")
                     vtt_lines.append(f"{current_sentence}\n")
-                    
-                    # 重置下一句
                     current_sentence = ""
-                    start_time = 0 # 下一句的開始時間會由下一個字的 offset 決定
+                    start_time = 0 
 
-        # 處理最後沒講完的句子
         if current_sentence:
-             # 這裡沒有最後的時間，稍微估算一下
              vtt_lines.append(f"{format_time(start_time)} --> {format_time(start_time + 10_000_000)}")
              vtt_lines.append(f"{current_sentence}\n")
 
-        # 編碼結果
         audio_b64 = base64.b64encode(audio_data).decode()
         vtt_content = "\n".join(vtt_lines)
         vtt_b64 = base64.b64encode(vtt_content.encode()).decode()
-        
         return audio_b64, vtt_b64
 
     except Exception as e:
@@ -148,8 +135,7 @@ st.sidebar.markdown("""
 <div class="info-box">
     <b>📢 曉臻老師的叮嚀：</b><br>
     現在有<b>「動態字幕」</b>囉！<br>
-    就像看 Youtube 一樣，字會跟著聲音跑出來，一次只顯示一句，讓眼睛更舒服！<br>
-    <br>
+    就像看 Youtube 一樣，字會跟著聲音跑出來。<br>
     有發現什麼 Bug，請來信：<br>
     <a href="mailto:flyer19820218@gmail.com" style="color: #01579b; text-decoration: none; font-weight: bold;">flyer19820218@gmail.com</a>
 </div>
@@ -245,15 +231,13 @@ if not st.session_state.class_started:
         else:
             st.warning(f"📂 找不到講義：{filename}")
 
-# 🚀 3. 開始按鈕 (動態進度條優化版)
+    # 3. 開始按鈕 (含進度條)
     st.divider()
     if st.button(f"🏃‍♀️ 確認無誤 - 開始今天的 AI 自然課程 (P.{start_page}~P.{start_page+4})", type="primary", use_container_width=True):
         if user_key and os.path.exists(pdf_path):
-            
-            # 🌟 改用 st.status 來顯示詳細進度，解決「感覺很久」的心理問題
+            # 🌟 動態進度條
             with st.status("🏃‍♀️ 曉臻老師正在暖身中...", expanded=True) as status:
                 try:
-                    # 步驟 1: 讀取講義
                     st.write("📖 正在翻閱講義圖片...")
                     doc = fitz.open(pdf_path)
                     images_to_process, display_images_list = [], []
@@ -269,7 +253,6 @@ if not st.session_state.class_started:
                         images_to_process.append(img)
                         display_images_list.append((p + 1, img))
                     
-                    # 步驟 2: AI 思考
                     st.write("🧠 正在分析科學概念與考點 (Gemini 2.5 Flash)...")
                     genai.configure(api_key=user_key)
                     MODEL = genai.GenerativeModel('models/gemini-2.5-flash') 
@@ -277,41 +260,31 @@ if not st.session_state.class_started:
                     res = MODEL.generate_content([f"{SYSTEM_PROMPT}\n導讀P.{start_page}起內容。"] + images_to_process)
                     raw_res = res.text.replace('\u00a0', ' ')
                     
-                    # 穩定切割
                     if "---PAGE_SEP---" in raw_res:
                         raw_parts_split = [p for p in raw_res.split("---PAGE_SEP---") if p.strip()]
                     else:
                         raw_parts_split = [raw_res]
                     st.session_state.raw_parts = raw_parts_split
                     
-                    # 步驟 3: 語音合成
                     st.write("🎙️ 正在錄製語音與生成字幕 (這一步最久，請稍候)...")
-                    
                     voice_matches = re.findall(r'\[\[VOICE_START\]\](.*?)\[\[VOICE_END\]\]', raw_res, re.DOTALL)
                     if voice_matches:
                         voice_full_text = " ".join(voice_matches)
                     else:
                         voice_full_text = clean_for_eye(raw_res)
                     
-                    # 呼叫音訊生成
                     audio_b64, vtt_b64 = asyncio.run(generate_audio_and_vtt(voice_full_text))
                     
                     st.session_state.audio_b64 = audio_b64
                     st.session_state.vtt_b64 = vtt_b64
                     st.session_state.display_images = display_images_list
                     
-                    # 完成！
                     status.update(label="✅ 備課完成！曉臻老師準備好了！", state="complete", expanded=False)
                     st.session_state.class_started = True
                     st.rerun() 
-                    
                 except Exception as e:
                     st.error(f"❌ 發生錯誤：{e}")
                     status.update(label="❌ 備課失敗", state="error")
-        elif not user_key:
-            st.warning("🔑 請先輸入實驗室啟動金鑰。")
-        else:
-            st.error(f"📂 找不到講義文件：{filename}")
         elif not user_key:
             st.warning("🔑 請先輸入實驗室啟動金鑰。")
         else:
@@ -321,13 +294,10 @@ else:
     # 狀態 B: 上課中顯示
     st.success("🔔 曉臻老師正在上課中！")
     
-    # 🌟 YouTube 風格播放器 (嵌入 VTT)
+    # YouTube 風格播放器 (嵌入 VTT)
     if st.session_state.audio_b64 and st.session_state.vtt_b64:
-        # 使用 HTML5 <track> 標籤來載入字幕
-        # ::cue 是 CSS 用來美化字幕的偽元素
         audio_player_html = f"""
         <style>
-         /* 美化字幕外觀：黑底白字，圓角，大字體 */
          video::cue, audio::cue {{
             background-color: rgba(0, 0, 0, 0.7) !important;
             color: white !important;
@@ -346,12 +316,8 @@ else:
 
     st.divider()
 
-    raw_parts = st.session_state.get("raw_parts", [])
-
-    # 顯示每一頁的講義 (不顯示文字稿，因為有字幕了！)
     for i, (p_num, img) in enumerate(st.session_state.display_images):
         st.image(img, caption=f"🏁 第 {p_num} 頁講義", use_container_width=True)
-        # 這裡我們故意把逐字稿隱藏起來，只留圖片，讓學生專注看字幕和圖片
         st.divider()
 
     if st.button("🏁 下課休息 (回到首頁)"):
