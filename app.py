@@ -1,317 +1,328 @@
-import os, re, io, time, base64, asyncio
 import streamlit as st
 import google.generativeai as genai
-import fitz  # pymupdf
+import os, asyncio, edge_tts, re, base64, io, random
 from PIL import Image
-import edge_tts
-from mutagen.mp3 import MP3
-from streamlit_autorefresh import st_autorefresh
 
+# --- 零件檢查 ---
+try:
+    import fitz # pymupdf
+except ImportError:
+    st.error("❌ 零件缺失！請確保安裝了 pymupdf。")
+    st.stop()
 
-# =========================
-# A) 設定 & 風格
-# =========================
+# --- 1. 核心視覺規範 (全白背景、移除標籤方框、翩翩體) ---
 st.set_page_config(page_title="臻·極速自然能量域", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
-<style>
-:root { color-scheme: light !important; }
-.stApp, [data-testid="stAppViewContainer"], .stMain, [data-testid="stHeader"] { background:#fff !important; }
-[data-testid="stSidebar"] { min-width: 320px !important; max-width: 320px !important; }
-[data-testid="stWidgetLabel"] div, [data-testid="stWidgetLabel"] p { background:transparent !important; border:none !important; box-shadow:none !important; padding:0 !important; }
-html, body, .stMarkdown, p, label, li, h1, h2, h3, .stButton button, a {
-  color:#000 !important; font-family:'HanziPen SC','翩翩體',sans-serif !important;
-}
-.stButton button { border:2px solid #000 !important; background:#fff !important; font-weight:bold !important; }
-.box { border:1px solid #ddd; padding:12px; border-radius:10px; background:#fafafa; }
-</style>
+    <style>
+    /* 1. 全局視覺鎖定 (白底黑字) */
+    :root { color-scheme: light !important; }
+    .stApp, [data-testid="stAppViewContainer"], .stMain, [data-testid="stHeader"] { 
+        background-color: #ffffff !important; 
+    }
+    
+    /* 2. 空間與邊距調整 */
+    div.block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; }
+    section[data-testid="stSidebar"] > div { padding-top: 1rem !important; }
+    [data-testid="stSidebar"] { min-width: 320px !important; max-width: 320px !important; }
+    header[data-testid="stHeader"] { background-color: transparent !important; z-index: 1 !important; }
+    button[data-testid="stSidebarCollapseButton"] { color: #000000 !important; display: block !important; }
+
+    /* 3. 🚨 暴力拔除標籤方框 (起始頁碼、冊別等標籤) */
+    [data-testid="stWidgetLabel"] div, [data-testid="stWidgetLabel"] p {
+        background-color: transparent !important;
+        border: none !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+    }
+
+    /* 4. 字體規範：全黑翩翩體 */
+    html, body, .stMarkdown, p, label, li, h1, h2, h3, .stButton button, a {
+        color: #000000 !important;
+        font-family: 'HanziPen SC', '翩翩體', sans-serif !important;
+    }
+
+    .stButton button {
+        border: 2px solid #000000 !important;
+        background-color: #ffffff !important;
+        font-weight: bold !important;
+    }
+
+    /* 5. 區塊樣式 */
+    .info-box { border: 1px solid #ddd; padding: 1rem; border-radius: 8px; background-color: #f9f9f9; font-size: 0.9rem; color: #000; }
+    .guide-box { border: 2px dashed #01579b; padding: 1rem; border-radius: 12px; background-color: #f0f8ff; color: #000; }
+    .transcript-box { background-color: #fdfdfd; border-left: 5px solid #000; padding: 15px; margin-bottom: 25px; line-height: 1.6; }
+    </style>
 """, unsafe_allow_html=True)
 
 st.title("🏃‍♀️ 臻 · 極速自然能量域")
-st.markdown("### 🔬 曉臻老師：一次講 5 頁（逐句字幕 + 自動翻頁）")
+st.markdown("### 🔬 資深理化老師 AI 助教：曉臻老師陪你衝刺科學馬拉松")
 st.divider()
 
-
-# =========================
-# B) 讀 prompt.txt（避免被截斷）
-# =========================
-def load_prompt(path="prompt.txt"):
-    if not os.path.exists(path):
-        st.error(f"❌ 找不到 {path}，請建立 prompt.txt 並貼上你的 SYSTEM_PROMPT")
-        st.stop()
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read().strip()
-
-SYSTEM_PROMPT = load_prompt("prompt.txt")
-
-
-# =========================
-# C) 小工具
-# =========================
-def run_async(coro):
-    try:
-        return asyncio.run(coro)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-
-def split_to_captions(text: str):
-    t = re.sub(r"\s+", " ", text.strip())
-    parts = re.split(r"(?<=[。！？；…])\s*", t)
-    parts = [p.strip() for p in parts if p.strip()]
-    return parts if parts else [t]
-
-
-# =========================
-# D) PDF：頁數 & 轉圖（縮小避免 Vision 太慢）
-# =========================
-@st.cache_data(show_spinner=False)
-def pdf_page_count(pdf_path: str) -> int:
-    doc = fitz.open(pdf_path)
-    return len(doc)
-
-@st.cache_data(show_spinner=False)
-def pdf_page_png(pdf_path: str, page_1based: int, zoom: float = 1.0) -> bytes:
-    doc = fitz.open(pdf_path)
-    idx = page_1based - 1
-    if idx < 0 or idx >= len(doc):
-        return b""
-    pix = doc.load_page(idx).get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-    return pix.tobytes("png")
-
-def png_to_pil(png_bytes: bytes) -> Image.Image:
-    return Image.open(io.BytesIO(png_bytes))
-
-
-# =========================
-# E) Gemini：產生顯示稿+語音稿（60秒 timeout）
-# =========================
-def gemini_make_text(api_key: str, page_num: int, page_img: Image.Image):
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("models/gemini-2.0-flash")  # 先求穩與快
-
-    t0 = time.time()
-    res = model.generate_content(
-        [f"{SYSTEM_PROMPT}\n導讀P.{page_num}內容。", page_img],
-        request_options={"timeout": 60}
-    )
-    raw = (res.text or "").replace("\u00a0", " ").strip()
-    st.caption(f"✅ Gemini 完成（{time.time()-t0:.1f}s）")
-
-    # 語音稿
-    voice_matches = re.findall(r"\[\[VOICE_START\]\](.*?)\[\[VOICE_END\]\]", raw, re.DOTALL)
-    voice_text = " ".join(m.strip() for m in voice_matches).strip() if voice_matches else raw
-
-    # 顯示稿
-    display_text = re.sub(r"\[\[VOICE_START\]\].*?\[\[VOICE_END\]\]", "", raw, flags=re.DOTALL).strip()
-    return display_text, voice_text
-
-
-# =========================
-# F) TTS：產 mp3 + 逐句字幕（60秒 timeout）
-# =========================
-async def tts_make_audio(text: str):
+# --- 2. 曉臻語音引擎 (暴力音正 + 雜音過濾) ---
+async def generate_voice_base64(text):
     voice_text = text.replace("---PAGE_SEP---", " ")
-    voice_text = voice_text.replace("$", "")
-    voice_text = voice_text.replace("[[VOICE_START]]", "").replace("[[VOICE_END]]", "")
-    voice_text = re.sub(r"[<>#@*_=]", "", voice_text)
-
-    communicate = edge_tts.Communicate(voice_text, "zh-TW-HsiaoChenNeural", rate="-2%")
+    
+    # 這裡保留你原本的 corrections 字典
+    corrections = {"補給": "補己", "Ethanol":"75g", "七十五公克": "乙醇", "75%": "百分之七十五"}
+    for word, correct in corrections.items():
+        voice_text = voice_text.replace(word, correct)
+    
+    # 🚨 修正關鍵：不要把整個內容都洗掉！
+    # 我們只移除 LaTeX 的 $ 符號，並保持文字完整性
+    clean_text = voice_text.replace("$", "")
+    
+    # 移除 [[VOICE_START]] 這類標籤字眼，但保留標籤中間的長篇大論
+    clean_text = clean_text.replace("[[VOICE_START]]", "").replace("[[VOICE_END]]", "")
+    
+    # 只洗掉會讓語音引擎當機的特殊符號，保留標點符號讓曉臻有停頓感
+    clean_text = re.sub(r'[<>#@*_=]', '', clean_text)
+    
+    communicate = edge_tts.Communicate(clean_text, "zh-TW-HsiaoChenNeural", rate="-2%")
     audio_data = b""
     async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_data += chunk["data"]
-
-    dur = MP3(io.BytesIO(audio_data)).info.length
+        if chunk["type"] == "audio": audio_data += chunk["data"]
     b64 = base64.b64encode(audio_data).decode()
-    audio_html = f"""
-    <audio controls autoplay style="width:100%">
-      <source src="data:audio/mp3;base64,{b64}" type="audio/mp3">
-    </audio>
-    """
-    captions = split_to_captions(voice_text)
-    return audio_html, dur, captions
+    return f'<audio controls autoplay style="width:100%"><source src="data:audio/mp3;base64,{b64}" type="audio/mp3"></audio>'
 
-def make_page_packet(api_key: str, pdf_path: str, page_num: int):
-    png = pdf_page_png(pdf_path, page_num, zoom=1.0)  # ✅ 重要：縮小
-    if not png:
-        return None
-    img = png_to_pil(png)
+# --- 💡 專家修正：解決文字稿消失與公式渲染問題 ---
+def clean_for_eye(text):
+    t = text.replace('\u00a0', ' ').replace("---PAGE_SEP---", "")
+    # 挖掉讀音標籤，留下純淨的逐字稿文字
+    t = re.sub(r'\[\[VOICE_START\]\].*?\[\[VOICE_END\]\]', '', t, flags=re.DOTALL)
+    t = t.replace("【顯示稿】", "").replace("【隱藏讀音稿】", "").replace("～～", "")
+    return t.strip()
 
-    # 1) Gemini
-    display_text, voice_text = gemini_make_text(api_key, page_num, img)
+# --- 3. 側邊欄 (完整原封不動內容) ---
+st.sidebar.title("打開實驗室大門-金鑰")
 
-    # 2) TTS（加 60 秒 timeout，避免卡死）
-    t0 = time.time()
-    try:
-        audio_html, dur, captions = run_async(asyncio.wait_for(tts_make_audio(voice_text), timeout=60))
-    except Exception as e:
-        raise RuntimeError(f"TTS 失敗或超時：{e}")
-    st.caption(f"✅ TTS 完成（{time.time()-t0:.1f}s）")
+st.sidebar.markdown("""
+<div class="info-box">
+    <b>📢 曉臻老師的叮嚀：</b><br>
+    曉臻是 AI，不一定完全對，但別小看她。一般的考試可是輕輕鬆鬆考滿分！曉臻怕大家會不專心，一次只會上5頁的講義。想要繼續上課，選好頁碼，再按一次就可以了。有發現什麼 Bug，請來信：<br>
+    <a href="mailto:flyer19820218@gmail.com" style="color: #01579b; text-decoration: none; font-weight: bold;">flyer19820218@gmail.com</a>
+</div>
+<br>
+""", unsafe_allow_html=True)
 
-    interval_ms = max(350, int((dur / max(1, len(captions))) * 1000))
-    return {
-        "page_num": page_num,
-        "img": img,
-        "display_text": display_text,
-        "audio_html": audio_html,
-        "captions": captions,
-        "interval_ms": interval_ms,
-    }
+st.sidebar.markdown("""
+<div class="guide-box">
+    <b>📖 值日生啟動指南 (6項說明)：</b><br>
+    1. 前往 <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:#01579b; font-weight:bold;">Google AI Studio</a>。<br>
+    2. 登入google帳號，第一次只要打勾即可產生金鑰<br>
+    3. 點擊 <b>Create API key</b> 按鈕。<br>
+    4. 複製產生的金鑰代碼。<br>
+    5. 貼回下方「實驗室啟動金鑰」區。<br>
+    6. 按下 Enter 即可啟動曉臻助教！
+</div>
+""", unsafe_allow_html=True)
 
+user_key = st.sidebar.text_input("🔑 實驗室啟動金鑰", type="password", key="tower_key")
+st.sidebar.divider()
+st.sidebar.subheader("💬 曉臻問題箱")
+student_q = st.sidebar.text_input("打字問曉臻：", key="science_q")
+uploaded_file = st.sidebar.file_uploader("📸 照片區：", type=["jpg", "png", "jpeg"], key="science_f")
 
-# =========================
-# G) Sidebar：選冊/章/頁 → 先預覽，再開始
-# =========================
-st.sidebar.markdown('<div class="box"><b>流程</b><br>1) 填 API key<br>2) 選冊/章（立刻預覽）<br>3) 選起始頁<br>4) 開始 → 一次講 5 頁</div>', unsafe_allow_html=True)
-api_key = st.sidebar.text_input("🔑 Gemini API Key", type="password")
+# --- 修改點：確保圖片快取不會遺失 ---
+if "class_started" not in st.session_state: st.session_state.class_started = False
+if "display_images" not in st.session_state: st.session_state.display_images = []
+if "res_text" not in st.session_state: st.session_state.res_text = ""
+   
+# --- 4. 曉臻教學核心指令 (互動測驗加強版) ---
+SYSTEM_PROMPT = r"""
+你是資深自然科學助教曉臻。你現在要進行一場約 20 分鐘的深度講義導讀。
+每一頁「顯示稿」中，必須明確包含以下三個段落標題，且順序固定：
+【曉臻老師上課逐字說明】
+【知識點總結】
+【常見考點提醒】
 
-vol = st.sidebar.selectbox("📚 冊別", ["第一冊","第二冊","第三冊","第四冊","第五冊","第六冊"], index=3)
-chap = st.sidebar.selectbox("🧪 章節", ["第一章","第二章","第三章","第四章","第五章","第六章"], index=2)
+⚠️【曉臻老師上課逐字說明】必須是口語、白話、像真的老師在講課
+⚠️ 不得放入 [[VOICE_START]] 標籤
 
-filename = f"{vol}_{chap}.pdf"
+1. 【深度解說與擴充】：
+   - ⚠️ 每一頁解說必須超過 250 字，包含實驗細節、圖表數值解析與觀念推導。
+   - 每一頁內容解說完畢後，必須進行該頁的「知識點總結」與「常見考點提醒」。
+
+2. ⚠️【顯示稿規範】：
+   - 每一頁必須包含這三個標題與內容：【曉臻老師上課逐字說明】、【知識點總結】、【常見考點提醒】。
+   - 這三個標題與其內容「絕對禁止」放入 [[VOICE_START]] 標籤中，必須留在標籤外面。
+   - 化學式與反應式必須使用標準 LaTeX，且嚴禁出現「～～」。
+   - 範例：$$2H_{2}O \xrightarrow{電解} 2H_{2} + O_{2}$$
+
+3. ⚠️【隱藏讀音稿規範】：
+   - 這是你要唸出來的文字，必須「百分之百」包裹在 [[VOICE_START]] 與 [[VOICE_END]] 之間。
+   - 內容要包含上述所有顯示稿的口語化版本，並加上慢速標記（如 C～～ u～～）。
+   - 結晶水標記（·）必須讀作『帶 X 個結晶水』。
+   - 範例：[[VOICE_START]] 同學們看這張圖，這是 C～～ u～～ S～～ O～～ four～～ 帶五個結晶水... [[VOICE_END]]
+
+4. 【互動與開場】：
+   - 開場必從【曉臻科學小知識庫】隨機選取一則，並連結至今日課程。
+   - 結尾必喊：『這就是自然科學 the 真理！』
+   - 每一頁最後必須出 2 題隨堂填充練習題。
+   - 題目格式：『隨堂練習 Q1：[題目內容] _______。』
+   - 答案格式：『答案 A1：[標準答案]。』
+
+5. 【科學開場與馬拉松人設】：
+   - 妳是馬拉松選手 (半馬PB 92分)。
+   - 語氣要有耐心、緩慢，適度增加思考性的停頓詞（如：『我們思考一下...』）。
+   - 結尾必含：『熱身一下，待會下課老師就要去跑步了』。
+
+6. 【化學式規範 (讀音專用)】：
+   - 二氧化碳 ➔ C～～ O～～ two～～ 也就是二氧化碳
+   - 雙氧水 ➔ H～～ two～～ O～～ two～～ 也就是雙氧水
+   - 乙醇 ➔ Ethanol (乙醇)
+   - 結晶水 ➔ C～～ u～～ S～～ O～～ four～～ 帶五個結晶水，也就是硫酸銅晶體
+
+7. 【翻頁與偵測】：
+   - 解說完當頁內容才唸『翻到第 X 頁』。
+   - 每頁解說最開頭加上標籤『---PAGE_SEP---』。
+   - 僅當圖片明確出現「練習」二字才啟動題目模式。
+
+# --- 曉臻科學小知識庫 ---
+1. BDNF：運動能促進「腦源性神經滋養因子」分泌。
+2. 鳶尾素 (Irisin)：肌肉運動時會分泌這種激素。
+3. 海馬迴增生：有氧運動能增加大腦海馬迴的血流量，這是大腦中負責長期記憶與空間導航的核心。
+4. 前額葉皮質：規律跑步能活化負責決策與專注的「前額葉」，讓學生在處理複雜物理題時邏輯更清晰。
+5. 神經遞質平衡：運動能調節麩胺酸與 GABA 的平衡，這就像幫大腦「重新開機」，能有效緩解考前焦慮。
+6. 線粒體動力：運動會增加神經細胞內的線粒體密度，提供大腦在高強度思考時所需的 ATP 能量。
+7. 突觸塑性：身體活動會增加神經元突觸的密度，讓大腦的「迴路」更寬闊，學習新知識的速度更快。
+8. 內啡肽 (Endorphins)：這就是「跑者愉悅」的來源，能提升大腦對學習壓力的耐受度，讓人心情變好。
+9. 晝夜節律：白天的適度運動能調節褪黑激素分泌，改善睡眠品質，而充足的睡眠是記憶固化的關鍵。
+10. 鏡像神經元：集體運動（如接力賽）能活化鏡像神經元，提升學生的社交理解與團隊合作能力。
+"""
+
+# ... (前面的 CSS, imports, 函數, 側邊欄代碼都保持不變) ...
+
+# --- 5. 導航系統 ---
+st.divider() # 加一條線區隔
+col1, col2, col3 = st.columns([1, 1, 1])
+with col1: vol_select = st.selectbox("📚 冊別選擇", ["第一冊", "第二冊", "第三冊", "第四冊", "第五冊", "第六冊"], index=3)
+with col2: chap_select = st.selectbox("🧪 章節選擇", ["第一章", "第二章", "第三章", "第四章", "第五章", "第六章"], index=0)
+with col3: start_page = st.number_input("🏁 起始頁碼", 1, 200, 1, key="start_pg") # 範圍加大一點
+
+filename = f"{vol_select}_{chap_select}.pdf"
 pdf_path = os.path.join("data", filename)
 
+# --- 主畫面邏輯 ---
+if not st.session_state.class_started:
+    
+    # 🌟 新增功能 2：電子書即時預覽區 (不消耗 Token)
+    # 邏輯：檢查檔案存在 -> 打開 PDF -> 讀取 start_page -> 顯示圖片
+    if os.path.exists(pdf_path):
+        try:
+            doc = fitz.open(pdf_path)
+            total_pages = len(doc)
+            
+            # 防呆機制：如果頁碼超過範圍
+            if start_page > total_pages:
+                st.warning(f"⚠️ 同學跑太遠囉！這本講義只有 {total_pages} 頁，請修正頁碼。")
+            else:
+                # 載入當前選擇的那一頁
+                page = doc.load_page(start_page - 1) 
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) # 解析度設為 2 倍，清晰度剛好
+                img = Image.open(io.BytesIO(pix.tobytes()))
+                
+                # 使用 expander 收納，讓畫面保持整潔，預設展開
+                with st.expander(f"👀 講義預覽窗：目前停在第 {start_page} 頁 (全書共 {total_pages} 頁)", expanded=True):
+                    st.image(img, caption=f"📍 準備從第 {start_page} 頁開始衝刺 (一次 5 頁)", use_container_width=True)
+                    
+        except Exception as e:
+            st.error(f"❌ 講義讀取失敗：{e}")
+    else:
+        st.warning(f"📂 找不到講義：{filename}，請確認 data 資料夾內是否有該檔案。")
 
-# =========================
-# H) Session state（只管 5 頁）
-# =========================
-if "mode" not in st.session_state: st.session_state.mode = "preview"  # preview/teach/break
-if "start_page" not in st.session_state: st.session_state.start_page = 1
-if "end_page" not in st.session_state: st.session_state.end_page = 5
-if "pkt" not in st.session_state: st.session_state.pkt = None
-if "cap_i" not in st.session_state: st.session_state.cap_i = 0
-if "cached_key" not in st.session_state: st.session_state.cached_key = ""
+    # 🚀 1. 開始按鈕 (維持原樣)
+    if st.button(f"🏃‍♀️ 確認無誤-開始今天的 AI 自然課程 (P.{start_page}~P.{start_page+4})", type="primary", use_container_width=True):
+        if user_key and os.path.exists(pdf_path):
+            with st.spinner("曉臻正在超音速備課中..."):
+                try:
+                    doc = fitz.open(pdf_path)
+                    images_to_process, display_images_list = [], []
+                    
+                    # 讀取連續 5 頁
+                    pages_to_read = range(start_page - 1, min(start_page + 4, len(doc)))
+                    
+                    if len(pages_to_read) == 0:
+                         st.error("⚠️ 已經到最後一頁了，沒有內容可以上課囉！")
+                         st.stop()
 
+                    for p in pages_to_read:
+                        pix = doc.load_page(p).get_pixmap(matrix=fitz.Matrix(2, 2))
+                        img = Image.open(io.BytesIO(pix.tobytes()))
+                        images_to_process.append(img)
+                        display_images_list.append((p + 1, img))
+                    
+                    genai.configure(api_key=user_key)
+                    MODEL = genai.GenerativeModel('models/gemini-2.5-flash') 
+                    
+                    # 生成內容
+                    res = MODEL.generate_content([f"{SYSTEM_PROMPT}\n導讀P.{start_page}起內容。"] + images_to_process)
+                    raw_res = res.text.replace('\u00a0', ' ')
+                    
+                    # 語音處理
+                    voice_matches = re.findall(r'\[\[VOICE_START\]\](.*?)\[\[VOICE_END\]\]', raw_res, re.DOTALL)
+                    if voice_matches:
+                        voice_full_text = " ".join(voice_matches)
+                    else:
+                        voice_full_text = raw_res.replace('[[VOICE_START]]', '').replace('[[VOICE_END]]', '')
+                    
+                    st.session_state.audio_html = asyncio.run(generate_voice_base64(voice_full_text))
+                    
+                    # 顯示稿處理
+                    display_res = re.sub(r'\[\[VOICE_START\]\].*?\[\[VOICE_END\]\]', '', raw_res, flags=re.DOTALL)
+                    st.session_state.res_text = display_res 
+                    
+                    st.session_state.display_images = display_images_list
+                    st.session_state.class_started = True
+                    st.rerun() 
+                except Exception as e:
+                    st.error(f"❌ 發生錯誤：{e}")
+        elif not user_key:
+            st.warning("🔑 請先輸入實驗室啟動金鑰。")
+        else:
+            st.error(f"📂 找不到講義文件：{filename}")
 
-# =========================
-# I) 預覽區：選章節就載入 PDF
-# =========================
-st.subheader("📄 講義預覽（選章節即載入）")
+    st.divider()
 
-if not os.path.exists(pdf_path):
-    st.error(f"📂 找不到：{filename}（請確認 data/ 內有這份 PDF）")
-    st.stop()
+    # 📸 2. 曉臻封面圖 (維持原樣)
+    cover_image_path = None
+    for ext in [".jpg", ".png", ".jpeg", ".JPG", ".PNG"]:
+        temp_path = os.path.join("data", f"cover{ext}")
+        if os.path.exists(temp_path):
+            cover_image_path = temp_path
+            break
+            
+    if cover_image_path:
+        try:
+            st.image(Image.open(cover_image_path), use_container_width=True)
+        except Exception:
+            st.info("🏃‍♀️ 曉臻老師正在操場跑步熱身中...")
+    else:
+        st.info("🏃‍♀️ 曉臻老師正在起跑線上準備中...")
 
-total = pdf_page_count(pdf_path)
-col1, col2 = st.columns([1, 2])
+else:
+    # 狀態 B: 上課中顯示 (這裡維持不變，等待下一步優化)
+    # ... (原本的上課中代碼) ...
+    st.success("🔔 曉臻老師正在上課中！")
+    if "audio_html" in st.session_state: 
+        st.markdown(st.session_state.audio_html, unsafe_allow_html=True)
+    st.divider()
 
-with col1:
-    sp = st.number_input("🏁 起始頁（本段講 5 頁）", 1, max(1, total), st.session_state.start_page)
-    st.session_state.start_page = int(sp)
-    st.session_state.end_page = min(int(sp) + 4, total)
-    st.write(f"📌 範圍：{st.session_state.start_page}～{st.session_state.end_page}")
+    raw_text = st.session_state.get("res_text", "").replace('\u00a0', ' ')
+    parts = [p.strip() for p in raw_text.split("---PAGE_SEP---") if p.strip()] 
 
-with col2:
-    prev = pdf_page_png(pdf_path, st.session_state.start_page, zoom=1.2)
-    if prev:
-        st.image(prev, caption=f"預覽：第 {st.session_state.start_page} 頁", use_container_width=True)
+    if len(parts) > 0:
+        with st.chat_message("曉臻"): 
+            st.markdown(clean_for_eye(parts[0]))
 
-st.divider()
+    for i, (p_num, img) in enumerate(st.session_state.display_images):
+        st.image(img, caption=f"🏁 第 {p_num} 頁講義", use_container_width=True)
+        if (i + 1) < len(parts):
+            with st.container():
+                st.markdown(f'<div class="transcript-box"><b>📜 曉臻老師的逐字稿 (P.{p_num})：</b></div>', unsafe_allow_html=True)
+                st.markdown(clean_for_eye(parts[i+1]))
+        st.divider()
 
-
-# =========================
-# J) 開始上課
-# =========================
-if st.session_state.mode in ["preview", "break"]:
-    if st.button("🏃‍♀️ 開始上課（一次講 5 頁）", type="primary", use_container_width=True):
-        key_use = api_key.strip() if api_key else st.session_state.cached_key
-        if not key_use:
-            st.warning("請先輸入 Gemini API Key")
-            st.stop()
-
-        st.session_state.cached_key = key_use
-        st.session_state.cap_i = 0
-        page_now = st.session_state.start_page
-
-        with st.spinner(f"備課中：第 {page_now} 頁（首次會比較久）..."):
-            st.session_state.pkt = make_page_packet(key_use, pdf_path, page_now)
-            st.session_state.mode = "teach"
-            st.rerun()
-
-
-# =========================
-# K) 上課模式：逐句字幕 + 自動翻頁（到第 5 頁停）
-# =========================
-if st.session_state.mode == "teach":
-    pkt = st.session_state.pkt
-    if pkt is None:
-        st.session_state.mode = "preview"
+    if st.button("🏁 下課休息 (回到首頁)"):
+        st.session_state.class_started = False
         st.rerun()
-
-    st.success(f"🔔 上課中：第 {pkt['page_num']} 頁（本段：{st.session_state.start_page}～{st.session_state.end_page}）")
-    st.markdown(pkt["audio_html"], unsafe_allow_html=True)
-    st.image(pkt["img"], caption=f"🏁 第 {pkt['page_num']} 頁講義", use_container_width=True)
-
-    cap_box = st.empty()
-    caps = pkt["captions"]
-    i = st.session_state.cap_i
-    if caps:
-        line = caps[min(i, len(caps)-1)]
-        cap_box.markdown(
-            f"""<div style="position:sticky;bottom:0;padding:14px 16px;border:2px solid #000;border-radius:14px;background:#fff;font-size:24px;text-align:center;line-height:1.4;margin-top:12px;">{line}</div>""",
-            unsafe_allow_html=True
-        )
-
-    st_autorefresh(interval=pkt["interval_ms"], key="tick")
-    st.session_state.cap_i += 1
-
-    # 本頁結束 → 下一頁 / 或 5 頁結束
-    if caps and st.session_state.cap_i >= len(caps):
-        next_page = pkt["page_num"] + 1
-
-        if next_page > st.session_state.end_page:
-            st.session_state.mode = "break"
-            st.session_state.pkt = None
-            st.session_state.cap_i = 0
-            st.rerun()
-
-        with st.spinner(f"翻頁備課：第 {next_page} 頁..."):
-            key_use = st.session_state.cached_key
-            st.session_state.pkt = make_page_packet(key_use, pdf_path, next_page)
-            st.session_state.cap_i = 0
-            st.rerun()
-
-    with st.expander("📜 本頁完整文字稿（顯示稿）"):
-        st.markdown(pkt["display_text"])
-
-    if st.button("🏁 直接回預覽", use_container_width=True):
-        st.session_state.mode = "preview"
-        st.session_state.pkt = None
-        st.session_state.cap_i = 0
-        st.rerun()
-
-
-# =========================
-# L) 休息模式：下一段 5 頁
-# =========================
-if st.session_state.mode == "break":
-    st.success("✅ 本段 5 頁講完！休息一下～")
-    c1, c2 = st.columns(2)
-
-    with c1:
-        if st.button("➡️ 下一段 5 頁（繼續）", type="primary", use_container_width=True):
-            next_start = st.session_state.end_page + 1
-            if next_start > total:
-                st.info("已到最後一頁。")
-                st.session_state.mode = "preview"
-                st.rerun()
-
-            st.session_state.start_page = next_start
-            st.session_state.end_page = min(next_start + 4, total)
-            st.session_state.cap_i = 0
-
-            with st.spinner(f"備課中：第 {next_start} 頁..."):
-                st.session_state.pkt = make_page_packet(st.session_state.cached_key, pdf_path, next_start)
-                st.session_state.mode = "teach"
-                st.rerun()
-
-    with c2:
-        if st.button("🏁 回預覽（重新選頁）", use_container_width=True):
-            st.session_state.mode = "preview"
-            st.session_state.pkt = None
-            st.session_state.cap_i = 0
-            st.rerun()
